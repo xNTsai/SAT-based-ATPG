@@ -1117,6 +1117,8 @@ extern ABC_DLL void               Abc_NtkGenerateTDFaultList( Abc_Ntk_t * pNtk )
 extern ABC_DLL void               Abc_NtkInsertFaultSimGates(Abc_Ntk_t * pNtk);
 
 
+// Pseudo Boolean Optimization Related
+extern ABC_DLL void               Abc_ExecPBO();
 
 ABC_NAMESPACE_HEADER_END
 
