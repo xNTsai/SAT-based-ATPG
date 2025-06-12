@@ -1,0 +1,6 @@
+read ./testcase/c17_pa.bench
+fault_gen -c
+fault_sim
+fault_constraint
+backup
+pbo

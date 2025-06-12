@@ -1,0 +1,13 @@
+read ./testcase/c17_pa.bench
+fault_gen -c
+fault_sim -c
+ntk_combine
+fraig
+strash
+resyn2
+compress2
+fraig
+strash
+b
+&get
+&write_cnf atpg.cnf
