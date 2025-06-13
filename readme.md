@@ -1,13 +1,3 @@
-Here's a well-structured and polished `README.md` for your project based on everything you've provided. This version includes:
-
-- A clear **introduction**
-- Cleanly formatted **installation/build steps**
-- Instructions for **running a sample**
-- A placeholder for your **ABC custom commands**
-
----
-
-```markdown
 # SAT-based ATPG with Incremental PBO on ABC
 
 ## 🔍 Introduction
