@@ -1,4 +1,4 @@
-# SAT-based ATPG with Incremental PBO on ABC
+# SImproved SAT-based ATPG on ABC: Incremental PBO with better compaction
 
 ## 🔍 Introduction
 
