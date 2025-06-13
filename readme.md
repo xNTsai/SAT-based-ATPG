@@ -17,5 +17,5 @@ To build kissat solver
 
 # To Run the Sample Test Case
  
- * `./abc -f atpg1.dofile && ./abc -f atpg2.dofile`
+ * `./abc -f cnf_gen.dofile && ./abc -f pbo_solve.dofile`
 The output patterns will be stored at atpg.txt
