@@ -3,7 +3,7 @@
 [![Build (CMake)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix-cmake.yml/badge.svg)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix-cmake.yml)
 [![Built on ABC](https://img.shields.io/badge/built%20on-Berkeley%20ABC-blue)](https://github.com/berkeley-abc/abc)
 
-# Incremental PBO-Based SAT ATPG
+# Incremental SAT-PBO ATPG Framework on Berkeley ABC
 
 **A SAT/Pseudo-Boolean-Optimization ATPG engine, embedded directly into UC Berkeley's ABC as a set of new native commands.**
 
