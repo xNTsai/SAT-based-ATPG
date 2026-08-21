@@ -1,125 +1,234 @@
-[![.github/workflows/build-posix.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-posix.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-posix.yml)
-[![.github/workflows/build-windows.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-windows.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-windows.yml)
-[![.github/workflows/build-posix-cmake.yml](https://github.com/berkeley-abc/abc/actions/workflows/build-posix-cmake.yml/badge.svg)](https://github.com/berkeley-abc/abc/actions/workflows/build-posix-cmake.yml)
+[![Build (POSIX)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix.yml/badge.svg)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix.yml)
+[![Build (Windows)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-windows.yml/badge.svg)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-windows.yml)
+[![Build (CMake)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix-cmake.yml/badge.svg)](https://github.com/xNTsai/SAT-based-ATPG/actions/workflows/build-posix-cmake.yml)
+[![Built on ABC](https://img.shields.io/badge/built%20on-Berkeley%20ABC-blue)](https://github.com/berkeley-abc/abc)
 
-# ABC: System for Sequential Logic Synthesis and Formal Verification
+# Incremental PBO-Based SAT ATPG
 
-ABC is always changing but the current snapshot is believed to be stable.
+**A SAT/Pseudo-Boolean-Optimization ATPG engine, embedded directly into UC Berkeley's ABC as a set of new native commands.**
 
-## ABC fork with new features
+Given a gate-level circuit, this project generates a *minimal* set of test patterns that fully covers all detectable single stuck-at faults — by encoding the entire fault list as one incremental SAT problem and letting a Pseudo-Boolean Optimization (PBO) solver pick, at every iteration, the single input vector that kills the most remaining faults. The same fault-modeling infrastructure is then reused to solve the inverse problem: given a set of failing test responses, diagnose which gate is actually broken.
 
-Here is a [fork](https://github.com/yongshiwo/abc.git) of ABC containing Agdmap, a novel technology mapper for LUT-based FPGAs.  Agdmap is based on a technology mapping algorithm with adaptive gate decomposition [1]. It is a cut enumeration based mapping algorithm with bin packing for simultaneous wide gate decomposition, which is a patent pending technology.
+This was built as the final project for NTU's **113-2 VLSI Testing** course. The full methodology, formal problem encoding, and experimental results are written up in [`report.pdf`](./report.pdf); this README summarizes it and documents how to build and run the tool.
 
-The mapper is developed and maintained by Longfei Fan and Prof. Chang Wu at Fudan University in Shanghai, China.  The experimental results presented in [1] indicate that Agdmap can substantially improve area (by 10% or more) when compared against the best LUT mapping solutions in ABC, such as command "if".
+---
 
-The source code is provided for research and evaluation only. For commercial usage, please contact Prof. Chang Wu at wuchang@fudan.edu.cn.
+## Table of Contents
 
-References:
+- [Why](#why)
+- [What We Built](#what-we-built)
+- [Architecture](#architecture)
+- [New ABC Commands](#new-abc-commands)
+- [Fault Diagnosis](#fault-diagnosis)
+- [Getting Started](#getting-started)
+- [Running the Sample Flow](#running-the-sample-flow)
+- [Results](#results)
+- [Known Limitations & Future Work](#known-limitations--future-work)
+- [Repository Layout](#repository-layout)
+- [Team & Course Context](#team--course-context)
+- [References](#references)
+- [ABC Attribution & License](#abc-attribution--license)
 
-[1] L. Fan and C. Wu, "FPGA technology mapping with adaptive gate decompostion", ACM/SIGDA FPGA International Symposium on FPGAs, 2023. 
+---
 
-## Compiling:
+## Why
 
-To compile ABC as a binary, download and unzip the code, then type `make`.
-To compile ABC as a static library, type `make libabc.a`.
+Classical structural ATPG (e.g. PODEM) generates test patterns fault-by-fault, which scales well but tends to leave compaction on the table — patterns are not chosen with an eye toward also covering *other* faults. SAT-based ATPG techniques improve on this by formulating fault detection as a satisfiability query, and incremental SAT lets the solver reuse learned clauses across faults instead of starting from scratch each time.
 
-When ABC is used as a static library, two additional procedures, `Abc_Start()` 
-and `Abc_Stop()`, are provided for starting and quitting the ABC framework in 
-the calling application. A simple demo program (file src/demo.c) shows how to 
-create a stand-alone program performing DAG-aware AIG rewriting, by calling 
-APIs of ABC compiled as a static library.
+We push this one step further: instead of treating every fault as an independent SAT query, we encode *fault-activation and propagation conditions* as pseudo-Boolean constraints and hand the solver an explicit objective — **maximize the number of still-undetected faults killed by this one pattern**. Each iteration, we drop the faults that were just detected and re-optimize, so the resulting pattern set is chosen for compaction rather than assembled as a side effect.
 
-To build the demo program
+## What We Built
 
- * Copy demo.c and libabc.a to the working directory
- * Run `gcc -Wall -g -c demo.c -o demo.o`
- * Run `g++ -g -o demo demo.o libabc.a -lm -ldl -lreadline -lpthread`
+- **A stuck-at fault-modeling layer inside ABC's AIG/network representation** — fault-site enumeration (with checkpoint and equivalence-collapsing reduction), and structural insertion of the `(x, y)` fault-activation gates described by Fujita & Mishchenko [[1]](#references).
+- **A PBO constraint-gate generator** that lowers each fault's activation/propagation/path-existence condition (`p → q`) into AIG logic, so the whole detection condition for every fault becomes part of the same combinational network ABC already knows how to optimize and CNF-ize.
+- **A good/faulty network combiner** (`ntk_combine`) that XORs every good/faulty output pair into a single miter output — the core SAT condition `Faulty(in, xy) ≠ NoFault(in)` — while keeping the PBO constraint outputs separately observable for the optimizer.
+- **A CNF → OPB bridge and solver driver** (`runPBO.cpp` + the `pbo` command) that hands the instance to the [Mixed-Bag PBO solver](https://bitbucket.org/coreo-group/pbcomp24-cg) (winner of the 2024 PB competition), parses back the winning pattern, fault-simulates it to update the undetected-fault bitmap, and re-solves — iterating until the solver reports UNSAT, meaning every detectable fault has been covered.
+- **A fault-dropping constraint network** (`fault_constraint`, `add_tp`/`insert_tp`) that lets already-detected faults be excluded from later iterations without discarding the SAT instance's learned structure.
+- **A diagnosis mode** that reuses the exact same fault-activation encoding to work backwards from a set of fail logs to a ranked set of suspect faults, solved with [Kissat](https://github.com/arminbiere/kissat).
 
-To run the demo program, give it a file with the logic network in AIGER or BLIF. For example:
+All of this is implemented as genuine ABC commands (new fields on `Abc_Ntk_t`, new files under `src/base/abc/`, new entries in ABC's command table) — the whole pipeline from reading a benchmark to emitting a compact test set runs inside a single `abc` session driven by a `.dofile` script, no external orchestration required beyond invoking the PBO/SAT solver binaries themselves.
 
-    [...] ~/abc> demo i10.aig
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
-    Reading =   0.00 sec   Rewriting =   0.18 sec   Verification =   0.41 sec
+## Architecture
 
-The same can be produced by running the binary in the command-line mode:
+```mermaid
+flowchart TD
+    A["Benchmark (.bench)"] -->|read| B[ABC Network]
+    B -->|"fault_gen -c/-l"| C["Fault List\n(checkpoint / EFC-collapsed)"]
+    C -->|fault_sim| D["+ x,y fault-activation gates"]
+    C -->|"fault_sim -c"| E["+ x,y gates AND PBO constraint gates"]
+    D --> F["ntk_combine\n(XOR good vs. faulty outputs)"]
+    E --> F
+    F -->|fraig / strash / resyn2 / compress2| G[Optimized AIG]
+    G -->|"&write_cnf"| H[CNF]
+    H -->|CNF-to-OPB translation| I["OPB instance\n+ objective: maximize faults killed"]
+    I -->|"pbo → fork+exec mixed-bag"| J{PBO Solver}
+    J -->|SAT: pattern found| K["add_tp / insert_tp\n+ fault simulate, drop detected faults"]
+    K -->|new fault-drop constraint| H
+    J -->|UNSAT: no fault left detectable| L["atpg.txt\ncompact test set"]
+```
 
-    [...] ~/abc> ./abc
-    UC Berkeley, ABC 1.01 (compiled Oct  6 2012 19:05:18)
-    abc 01> r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
+Each pipeline stage maps directly onto one of the [new ABC commands](#new-abc-commands); see `report.pdf` §VI for the full derivation of the constraint encodings, and `CLAUDE.md` in this repo for a code-level map of which source file implements which stage.
 
-or in the batch mode:
+## New ABC Commands
 
-    [...] ~/abc> ./abc -c "r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec"
-    ABC command line: "r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec".
-    i10          : i/o =  257/  224  lat =    0  and =   2396  lev = 37
-    i10          : i/o =  257/  224  lat =    0  and =   1851  lev = 35
-    Networks are equivalent.
+| Command | Purpose |
+|---|---|
+| `fault_gen [-c] [-l]` | Enumerate single stuck-at fault sites for the current network. `-c` does checkpoint-based generation; `-l` applies equivalence fault collapsing (EFC) on top. |
+| `fault_sim [-c]` | Insert the `(x, y)` fault-activation gates for every fault in the list. `-c` additionally inserts the PBO local-detection constraint gates (activation / propagation / path-existence). |
+| `ntk_combine` | Build the combined good+faulty miter network (XOR every output pair, OR them into a single fault-detection output) used by the SAT/PBO query. |
+| `fault_constraint` | Build a separate constraint network (good vs. faulty, NOR'd outputs) used purely to encode "this fault is already detected," for fault dropping. |
+| `add_tp <pattern>` | Record a test pattern (as produced by the PBO solver) for later use. |
+| `insert_tp [-f]` | Bind the most recently added pattern's primary-input values into the current network; `-f` binds it into the fault-constraint network instead. |
+| `add_po <pattern>` | Force the expected primary-output values for diagnosis (used to encode `Faulty(in, xy) = observed_output`). |
+| `pbo` | Fork/exec the external PBO solver on `atpg.cnf`, run the full incremental fault-dropping loop until UNSAT, and write all patterns found to `atpg.txt`. |
+| `print_faults [-s]` | Print the current fault list; `-s` prints aggregate fault-coverage statistics instead. |
 
-## Compiling as C or C++
+## Fault Diagnosis
 
-The current version of ABC can be compiled with C compiler or C++ compiler.
+The same `(x, y)` fault-activation encoding used for pattern generation also solves diagnosis "for free": for each observed test pattern, we set the primary inputs to the pattern and constrain the primary outputs (via `add_po`) to the values actually recorded in the fail log. Aggregating one such CNF per fail-log pattern, sharing the `(x, y)` variables across all of them, and handing the union to Kissat yields a single satisfying assignment to `(x, y)` that is consistent with *every* observed failure — i.e. the diagnosed fault(s).
 
- * To compile as C code (default): make sure that `CC=gcc` and `ABC_NAMESPACE` is not defined.
- * To compile as C++ code without namespaces: make sure that `CC=g++` and `ABC_NAMESPACE` is not defined.
- * To compile as C++ code with namespaces: make sure that `CC=g++` and `ABC_NAMESPACE` is set to
-   the name of the requested namespace. For example, add `-DABC_NAMESPACE=xxx` to OPTFLAGS.
+`diagnosis.sh` / `gen_diag_dofile.py` drive this end-to-end: they turn a pattern file plus a `Project_25S_diag/failLog/*.failLog` into a `.dofile`, run it through `abc`, and solve the resulting CNFs with the standalone `diagnosis` / `kissat` binaries. On the `c17` benchmark this reaches 100% diagnosis accuracy on every fail log in under a second per case (see [Results](#results)).
 
-## Building a shared library
+## Getting Started
 
- * Compile the code as position-independent by adding `ABC_USE_PIC=1`.
- * Build the `libabc.so` target: 
- 
-     make ABC_USE_PIC=1 libabc.so
+### Prerequisites
 
-## Bug reporting:
+- A C/C++17 toolchain (`gcc`/`g++`), `make`, and (optionally) `cmake` ≥ 3.5
+- `git` with submodule support
 
-Please try to reproduce all the reported bugs and unexpected features using the latest 
-version of ABC available from https://github.com/berkeley-abc/abc
+### 1. Clone
 
-If the bug still persists, please provide the following information:    
+```bash
+git clone --recursive https://github.com/xNTsai/SAT-based-ATPG.git
+cd SAT-based-ATPG
+```
 
- 1. ABC version (when it was downloaded from GitHub)
- 1. Linux distribution and version (32-bit or 64-bit)
- 1. The exact command-line and error message when trying to run the tool
- 1. The output of the `ldd` command run on the exeutable (e.g. `ldd abc`).
- 1. Versions of relevant tools or packages used.
+### 2. Build ABC (with the new ATPG commands) and the CNF→OPB bridge
 
+```bash
+make
+g++ -o runpbo runPBO.cpp
+```
 
-## Troubleshooting:
+### 3. Build the two external solvers
 
- 1. If compilation does not start because of the cyclic dependency check, 
-try touching all files as follows: `find ./ -type f -exec touch "{}" \;`
- 1. If compilation fails because readline is missing, install 'readline' library or
-compile with `make ABC_USE_NO_READLINE=1`
- 1. If compilation fails because pthreads are missing, install 'pthread' library or
-compile with `make ABC_USE_NO_PTHREADS=1`
-    * See http://sourceware.org/pthreads-win32/ for pthreads on Windows
-    * Precompiled DLLs are available from ftp://sourceware.org/pub/pthreads-win32/dll-latest
- 1. If compilation fails in file "src/base/main/libSupport.c", try the following:
-    * Remove "src/base/main/libSupport.c" from "src/base/main/module.make"
-    * Comment out calls to `Libs_Init()` and `Libs_End()` in "src/base/main/mainInit.c"
- 1. On some systems, readline requires adding '-lcurses' to Makefile.
+The PBO solver and the diagnosis SAT solver are pulled in as git submodules (`pbcomp24-cg/`, `kissat/`) — initialize them if you didn't clone with `--recursive`:
 
-The following comment was added by Krish Sundaresan:
+```bash
+git submodule update --init --recursive
+```
 
-"I found that the code does compile correctly on Solaris if gcc is used (instead of 
-g++ that I was using for some reason). Also readline which is not available by default 
-on most Sol10 systems, needs to be installed. I downloaded the readline-5.2 package 
-from sunfreeware.com and installed it locally. Also modified CFLAGS to add the local 
-include files for readline and LIBS to add the local libreadline.a. Perhaps you can 
-add these steps in the readme to help folks compiling this on Solaris."
+**Mixed-Bag PBO solver** (0-1 ILP cutting-plane solver, 1st place at the 2024 PB competition):
 
-The following tutorial is kindly offered by Ana Petkovska from EPFL:
-https://www.dropbox.com/s/qrl9svlf0ylxy8p/ABC_GettingStarted.pdf
+```bash
+cd pbcomp24-cg
+mkdir build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Dpapilo=ON -Dscip=ON -Dgmp=ON -Dsoplex=OFF
+cmake --build build -t mixed-bag
+cd ..
+```
 
-## Final remarks:
+> If your `cmake` is older than the version `pbcomp24-cg` expects, remove the `cmake_policy(SET CMP0135 NEW)` line from its `CMakeLists.txt`.
 
-Unfortunately, there is no comprehensive regression test. Good luck!                                
+**Kissat SAT solver** (used for diagnosis):
 
-This system is maintained by Alan Mishchenko <alanmi@berkeley.edu>. Consider also 
-using ZZ framework developed by Niklas Een: https://bitbucket.org/niklaseen/abc-zz (or https://github.com/berkeley-abc/abc-zz)
+```bash
+cd kissat
+./configure && make test
+cd ..
+```
+
+`./abc`, `./runpbo`, `pbcomp24-cg/build/mixed-bag`, and `kissat/build/kissat` are all invoked by relative path — always run from the repository root.
+
+## Running the Sample Flow
+
+`run.sh` builds everything above and runs the sample ATPG flow on the `c17` benchmark:
+
+```bash
+./abc -f cnf_gen.dofile     # read circuit, generate faults, build the combined network, emit atpg.cnf
+./abc -f pbo_solve.dofile   # generate faults/constraints, run the incremental PBO loop
+```
+
+The resulting compact test set is written to `atpg.txt`. `testcase/` ships all ten ISCAS-85 benchmarks (`c17` … `c7552`) in `.bench` format to try the flow on.
+
+To run diagnosis on a sample fail log:
+
+```bash
+./diagnosis.sh
+```
+
+which generates a per-pattern CNF for the `c17` circuit against `Project_25S_diag/failLog/c17-001.failLog`, then solves it with Kissat.
+
+## Results
+
+Measured on ISCAS-85 benchmarks (see `report.pdf` §VII for full methodology and hardware/timeout details):
+
+**Pattern count & coverage vs. PODEM**
+
+| Circuit | | PODEM | | | Ours (PBO only) | | | Ours (with fault simulation) | |
+|---|---|---|---|---|---|---|---|---|---|
+| | #Patterns | Coverage | Runtime | #Patterns | Coverage | Runtime | #Patterns | Coverage | Runtime |
+| c17 | 7 | 100% | 0.018s | 6 | 100% | 0.542s | 8 | 100% | 0.418s |
+| c432 | 20 | 17.88% | 0.998s | 20 | 17.88% | 760s | 20 | 17.88% | 525s |
+| c499 | 74 | 96.48% | 0.337s | N/A | N/A | N/A | 16 | 46.79% | 7h |
+
+**CNF growth from adding PBO fault-detection constraints**
+
+| Circuit | Base CNF | Added CNF (PBO constraints) |
+|---|---|---|
+| c17 | 73 vars, 154 clauses | 30 vars, 40 clauses |
+| c432 | 1899 vars, 3981 clauses | 821 vars, 1300 clauses |
+| c499 | 3938 vars, 8591 clauses | 1600 vars, 2600 clauses |
+
+On `c17`, the PBO-guided approach matches PODEM's fault coverage with **one fewer test pattern**, demonstrating that the optimization objective genuinely improves compaction when the solver can finish. Diagnosis on `c17` reaches **100% accuracy on every fail log**, each solved in under a second.
+
+## Known Limitations & Future Work
+
+We're upfront about where this approach currently breaks down, since it's the most useful part of the write-up:
+
+- **Scalability is the main bottleneck.** Every fault's activation/propagation/path constraints add variables and clauses to the shared instance, so CNF size grows quickly with circuit size (see table above). Past a few thousand variables, the ILP-based cutting-plane solver we used (Mixed-Bag) struggles — `c499` never finishes without fault simulation, and even with it takes ~7 hours for partial coverage.
+- **The solver restarts every iteration.** Because Mixed-Bag doesn't retain learned cuts/clauses across the incremental fault-dropping loop, each new PBO instance is solved close to from scratch — undercutting the incremental-SAT motivation. A SAT-based PBO solver that persists learned clauses across iterations (rather than an ILP-style cutting-plane solver) is the most promising fix, and is the direction we'd pursue next.
+- **Diagnosis has the same scaling issue in reverse**: without additional clauses limiting the number of simultaneous suspect faults, the solver returns degenerate solutions (e.g. up to 70 "suspects" at once on larger circuits) — those limiting clauses themselves grow expensive to add as fault-list size increases.
+
+In short: the encoding and the compaction objective work as designed on small/medium circuits, but making this practical on industrial-scale designs needs a PBO solver architecture better suited to incremental, highly-constrained instances.
+
+## Repository Layout
+
+```
+src/                    Berkeley ABC (upstream, unmodified aside from the additions below)
+├─ base/abc/abcFault.c  Fault-list generation, fault-activation/PBO-constraint gate insertion,
+│                       good/faulty network combination, test-pattern bookkeeping
+├─ base/abc/abcPbo.c    Abc_ExecPBO — forks/execs ./runpbo and parses the returned pattern
+└─ base/abci/abc.c      Command registration (fault_gen, fault_sim, ntk_combine, pbo, ...)
+runPBO.cpp              CNF → OPB translator; drives pbcomp24-cg/build/mixed-bag
+diagnosis.cpp           Standalone CNF combiner used by the diagnosis flow
+gen_diag_dofile.py      Fail-log + pattern file → .dofile generator for diagnosis
+*.dofile                Sample ABC command scripts (cnf_gen, pbo_solve)
+testcase/                ISCAS-85 benchmark circuits (.bench)
+Project_25S_diag/       Sample circuits, fail logs, and reference binaries used for diagnosis testing
+report.pdf              Full write-up: formal encoding, algorithm, results, discussion
+```
+
+See [`CLAUDE.md`](./CLAUDE.md) for a more detailed, code-level architecture map (useful if you're extending this rather than just running it).
+
+## Team & Course Context
+
+Built for **NTU 113-2 (Spring 2025) VLSI Testing**, final project.
+
+| Name | Contributions |
+|---|---|
+| **Cheng-En Tsai** | Framework design; fault modeling; fault simulation; fault constraint network; test-pattern handling |
+| Chen-Ching Nieh | Framework design; PBO solver integration & parser; PBO commands; diagnosis |
+| Chen-Yu Hsu | Framework design; fault-list generation; PBO constraint encoding |
+
+## References
+
+1. M. Fujita and A. Mishchenko, "Efficient SAT-based ATPG techniques for all multiple stuck-at faults," *2014 International Test Conference*, pp. 1–10, 2014.
+2. S. Eggersglüß, R. Wille, and R. Drechsler, "Improved SAT-based ATPG: More constraints, better compaction," *2013 IEEE/ACM International Conference on Computer-Aided Design (ICCAD)*, pp. 85–90, 2013.
+3. J. Elffers and J. Nordström, "Divide and conquer: Towards faster pseudo-Boolean solving," *IJCAI-18*, pp. 1291–1299, 2018.
+
+## ABC Attribution & License
+
+This project is built as a **derivative work of [Berkeley ABC](https://github.com/berkeley-abc/abc)**, UC Berkeley's system for sequential logic synthesis and formal verification. The vast majority of the `src/` tree — the AIG/GIA network representations, SAT solvers, and synthesis/optimization passes — is unmodified upstream ABC. Our contribution, described throughout this README, is the ATPG/diagnosis layer added on top of it: the new commands and data structures in `src/base/abc/abcFault.c` and `src/base/abc/abcPbo.c`, their registration in `src/base/abci/abc.c`, and the standalone `runPBO.cpp`, `diagnosis.cpp`, and `gen_diag_dofile.py` tools.
+
+ABC is distributed under a permissive, royalty-free license from the Regents of the University of California; the full text is preserved in [`copyright.txt`](./copyright.txt) and applies to this repository as a whole. External solvers used by this project — [Kissat](https://github.com/arminbiere/kissat) and the [Mixed-Bag PBO solver](https://bitbucket.org/coreo-group/pbcomp24-cg) — are pulled in as separate git submodules under their own respective licenses and are not redistributed as part of this repository.
